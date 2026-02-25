@@ -188,17 +188,19 @@ fi
 pause_step
 
 section_header "2) Manage Groups and /etc/group"
+show_output_source_header "COMMAND: getent group (root/sudo/wheel/docker highlighted)"
 print_groups_highlighted || warn "Could not enumerate groups with getent"
 if ! getent group | awk -F: '{print $1}' | grep -Eq '^(root|sudo|wheel|docker)$'; then
   warn "No root/sudo/wheel/docker groups found in getent output."
 fi
+pause_step
 if ask_yes_no "Open /etc/group in an editor now?" "N"; then
   open_in_editor /etc/group
 fi
 pause_step
 
 section_header "3) Review /etc/passwd and Optional User Deletion"
-cat /etc/passwd || warn "Cannot read /etc/passwd"
+show_file_with_pause "/etc/passwd"
 if ask_yes_no "Delete any users now?" "N"; then
   while true; do
     read -r -p "Enter username to delete (blank to stop): " del_user
@@ -226,6 +228,7 @@ pause_step
 section_header "4) Remove Unwanted Installed Programs"
 if [[ -f /root/installed_apps.txt ]]; then
   section_header "4a) Review Full Installed Application List"
+  show_output_source_header "FILE: /root/installed_apps.txt"
   if command_exists less; then
     less /root/installed_apps.txt
   else
@@ -246,7 +249,7 @@ fi
 pause_step
 
 section_header "5) Limit Process/File Descriptor Creation"
-cat /etc/security/limits.conf || warn "Cannot read limits.conf"
+show_file_with_pause "/etc/security/limits.conf"
 if ask_yes_no "Append recommended secure limits block to /etc/security/limits.conf?" "Y"; then
   append_block_once /etc/security/limits.conf "# BEGIN SECURITY LIMITS" "# BEGIN SECURITY LIMITS
 *       soft    nproc   512
@@ -263,15 +266,18 @@ pause_step
 
 section_header "6) Review Integrity Output"
 if [[ -f /root/modified_files.txt ]]; then
+  show_output_source_header "FILE: /root/modified_files.txt (first 250 lines)"
   sed -n '1,250p' /root/modified_files.txt
   info "Review flagged files in another terminal and remediate as needed."
+  pause_step
 else
+  show_output_source_header "FILE: /root/modified_files.txt"
   warn "/root/modified_files.txt not found yet (integrity scan may still be running)."
+  pause_step
 fi
-pause_step
 
 section_header "7) Review Ports and Disable Unneeded Services"
-list_listening_sockets || true
+show_command_with_pause "ss -tulnap / netstat -tulnap" list_listening_sockets
 disable_service_if_present avahi-daemon
 disable_service_if_present cups
 
@@ -294,7 +300,7 @@ apply_sysctl_hardening
 pause_step
 
 section_header "9) Harden /tmp, /var/tmp, /dev/shm in fstab"
-cat /etc/fstab || warn "Cannot read /etc/fstab"
+show_file_with_pause "/etc/fstab"
 if ask_yes_no "Add tmpfs noexec/nodev/nosuid entries if missing?" "Y"; then
   add_fstab_entry_if_missing "/tmp" "tmpfs  /tmp      tmpfs  defaults,nodev,nosuid,noexec  0  0"
   add_fstab_entry_if_missing "/var/tmp" "tmpfs  /var/tmp  tmpfs  defaults,nodev,nosuid,noexec  0  0"
@@ -324,8 +330,7 @@ else
     ssh_scored="no"
   fi
 
-  info "Current non-comment SSH settings:"
-  grep -Ev '^[[:space:]]*#|^[[:space:]]*$' /etc/ssh/sshd_config || true
+  show_shell_with_pause "grep non-comment lines from /etc/ssh/sshd_config" "grep -Ev '^[[:space:]]*#|^[[:space:]]*$' /etc/ssh/sshd_config || true"
 
   if ask_yes_no "Apply SSH hardening configuration now?" "Y"; then
     password_auth="no"

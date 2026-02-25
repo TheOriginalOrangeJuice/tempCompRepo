@@ -28,12 +28,13 @@ for u in "${target_users[@]}"; do
 done
 
 if [[ -s "$PASS_FILE" ]]; then
-  cat "$PASS_FILE"
+  show_file_with_pause "$PASS_FILE"
   ok "Password file created: $PASS_FILE"
 else
+  show_output_source_header "FILE: $PASS_FILE"
   warn "No qualifying users found. Password file is empty: $PASS_FILE"
+  pause_step
 fi
-pause_step
 
 section_header "2) Apply Password Changes (Only After Approval/Portal Submission)"
 if ask_yes_no "Apply these password changes now with chpasswd?" "N"; then

@@ -87,10 +87,13 @@ EOF_CLIENT
 
 validate_and_restart() {
   if command_exists rsyslogd; then
+    show_output_source_header "COMMAND: rsyslogd -N1"
     rsyslogd -N1 || {
       warn "rsyslog config validation failed. Not restarting service."
+      pause_step
       return 1
     }
+    pause_step
   fi
 
   systemctl daemon-reload || true
@@ -100,7 +103,9 @@ validate_and_restart() {
   }
 
   systemctl restart rsyslog || warn "Failed to restart rsyslog"
+  show_output_source_header "COMMAND: systemctl status rsyslog | head -n 40"
   systemctl --no-pager --full status rsyslog | sed -n '1,40p' || true
+  pause_step
 }
 
 section_header "Section 5 - Setup Rsyslog"
@@ -119,11 +124,14 @@ pause_step
 section_header "2) Install and Configure Rsyslog"
 install_rsyslog || true
 write_common_conf
+show_file_with_pause "/etc/rsyslog.d/00-rsyslog-common.conf"
 
 if [[ "$ROLE" == "server" ]]; then
   write_server_conf
+  show_file_with_pause "/etc/rsyslog.d/10-rsyslog-server.conf"
 else
   write_client_conf
+  show_file_with_pause "/etc/rsyslog.d/10-rsyslog-client.conf"
 fi
 
 validate_and_restart || true

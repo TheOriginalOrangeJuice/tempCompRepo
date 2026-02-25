@@ -73,14 +73,50 @@ ensure_locate_tool() {
   return 0
 }
 
+show_output_source_header() {
+  local source_label="$1"
+  printf '\n%s############################################%s\n' "$C_WARN" "$C_RESET"
+  printf '%s# OUTPUT SOURCE: %s%s\n' "$C_WARN" "$source_label" "$C_RESET"
+  printf '%s############################################%s\n' "$C_WARN" "$C_RESET"
+}
+
+show_file_with_pause() {
+  local file_path="$1"
+  show_output_source_header "FILE: $file_path"
+  if [[ -r "$file_path" ]]; then
+    cat "$file_path"
+  elif [[ -e "$file_path" ]]; then
+    warn "File exists but is not readable: $file_path"
+  else
+    warn "File not found: $file_path"
+  fi
+  pause_step
+}
+
+show_command_with_pause() {
+  local label="$1"
+  shift
+  show_output_source_header "COMMAND: $label"
+  "$@" || warn "Command failed: $label"
+  pause_step
+}
+
+show_shell_with_pause() {
+  local label="$1"
+  local shell_cmd="$2"
+  show_output_source_header "COMMAND: $label"
+  bash -c "$shell_cmd" || warn "Command failed: $label"
+  pause_step
+}
+
 scan_suid_guid() {
   local suid_file="/root/suid_files.txt"
   local sgid_file="/root/sgid_files.txt"
   local unexpected_file="/root/suid_unexpected.txt"
   local allow_file="/root/suid_allowlist.txt"
 
-  find / -perm -4000 -type f 2>/dev/null | sort -u | tee "$suid_file"
-  find / -perm -2000 -type f 2>/dev/null | sort -u | tee "$sgid_file"
+  find / -perm -4000 -type f 2>/dev/null | sort -u >"$suid_file"
+  find / -perm -2000 -type f 2>/dev/null | sort -u >"$sgid_file"
 
   cat >"$allow_file" <<'ALLOWEOF'
 /usr/bin/chfn
@@ -100,12 +136,15 @@ ALLOWEOF
 
   grep -Fxv -f "$allow_file" "$suid_file" >"$unexpected_file" || true
 
-  section_header "Unexpected SUID binaries (review manually)"
+  show_file_with_pause "$suid_file"
+  show_file_with_pause "$sgid_file"
+  show_output_source_header "FILE: $unexpected_file"
   if [[ -s "$unexpected_file" ]]; then
     cat "$unexpected_file"
   else
     ok "No unexpected SUID entries based on current allowlist."
   fi
+  pause_step
 
   info "If needed, remove dangerous SUID bits with: chmod u-x /path/to/exe"
 }
@@ -113,66 +152,78 @@ ALLOWEOF
 section_header "Section 1 - Enumeration"
 
 section_header "1) OS Version, Hostname, IP, Distribution"
-hostnamectl || warn "hostnamectl unavailable"
-uname -a || warn "uname failed"
-cat /etc/os-release || warn "Missing /etc/os-release"
+show_command_with_pause "hostnamectl" hostnamectl
+show_command_with_pause "uname -a" uname -a
+show_file_with_pause "/etc/os-release"
 if command_exists ip; then
-  ip addr
+  show_command_with_pause "ip addr" ip addr
 elif command_exists ifconfig; then
-  ifconfig -a
+  show_command_with_pause "ifconfig -a" ifconfig -a
 else
+  show_output_source_header "COMMAND: ip addr / ifconfig -a"
   warn "Neither ip nor ifconfig is available."
+  pause_step
 fi
-pause_step
 
 section_header "2) Services and Ports"
-list_listening_sockets || true
+show_command_with_pause "ss -tulnap / netstat -tulnap" list_listening_sockets
 if command_exists lsof; then
-  lsof -i -n -P || warn "lsof command failed"
+  show_command_with_pause "lsof -i -n -P" lsof -i -n -P
 else
+  show_output_source_header "COMMAND: lsof -i -n -P"
   warn "lsof not installed"
+  pause_step
 fi
 warn "TAKE A SCREENSHOT! Open ports and network services."
 pause_step
 
 section_header "3) DNS, LDAP, SSSD, Kerberos Checks"
-cat /etc/nsswitch.conf || warn "Cannot read /etc/nsswitch.conf"
+show_file_with_pause "/etc/nsswitch.conf"
 info "Check if ldap/sss entries exist in nsswitch sources."
 if grep -Eq '(^|[[:space:]])sss([[:space:]]|$)' /etc/nsswitch.conf 2>/dev/null; then
   info "sss detected in nsswitch. Printing /etc/sssd/sssd.conf (if present)."
   if [[ -f /etc/sssd/sssd.conf ]]; then
-    cat /etc/sssd/sssd.conf
+    show_file_with_pause "/etc/sssd/sssd.conf"
   else
+    show_output_source_header "FILE: /etc/sssd/sssd.conf"
     warn "/etc/sssd/sssd.conf not found"
+    pause_step
   fi
 fi
 if command_exists realm; then
-  realm list || warn "realm list failed"
+  show_command_with_pause "realm list" realm list
 else
+  show_output_source_header "COMMAND: realm list"
   warn "realm command not available"
+  pause_step
 fi
-systemctl --no-pager --full status sssd winbind 2>/dev/null || warn "sssd/winbind services not active or missing"
-cat /etc/hosts || warn "Cannot read /etc/hosts"
-cat /etc/resolv.conf || warn "Cannot read /etc/resolv.conf"
-pause_step
+show_command_with_pause "systemctl status sssd winbind" systemctl --no-pager --full status sssd winbind
+show_file_with_pause "/etc/hosts"
+show_file_with_pause "/etc/resolv.conf"
 
 section_header "4) Environment Variables and Bash Config"
-alias || true
+show_command_with_pause "alias" alias
+show_output_source_header "ENVIRONMENT: PATH"
 echo "PATH=$PATH"
+pause_step
 if [[ -f "$TARGET_HOME/.bashrc" ]]; then
-  cat "$TARGET_HOME/.bashrc"
+  show_file_with_pause "$TARGET_HOME/.bashrc"
 else
+  show_output_source_header "FILE: $TARGET_HOME/.bashrc"
   warn "No .bashrc found for $TARGET_USER at $TARGET_HOME"
+  pause_step
 fi
 if [[ -f "$TARGET_HOME/.bash_history" ]]; then
-  cat "$TARGET_HOME/.bash_history"
+  show_file_with_pause "$TARGET_HOME/.bash_history"
 else
+  show_output_source_header "FILE: $TARGET_HOME/.bash_history"
   warn "No .bash_history found for $TARGET_USER at $TARGET_HOME"
+  pause_step
 fi
-pause_step
 
 section_header "5) Enumerate Users and Shell Access"
-getent passwd 0 || warn "Could not query UID 0"
+show_command_with_pause "getent passwd 0" getent passwd 0
+show_output_source_header "FILE: /etc/passwd (false/nologin highlighted)"
 if [[ -r /etc/passwd ]]; then
   awk '{
     line=$0
@@ -180,22 +231,32 @@ if [[ -r /etc/passwd ]]; then
     gsub(/nologin/,"\033[1;31mnologin\033[0m",line)
     print line
   }' /etc/passwd
+else
+  warn "Cannot read /etc/passwd"
 fi
+pause_step
+show_output_source_header "COMMAND: getent group (root/sudo/wheel/docker highlighted)"
 print_groups_highlighted || warn "Could not enumerate groups with getent"
 if ! getent group | awk -F: '{print $1}' | grep -Eq '^(root|sudo|wheel|docker)$'; then
   warn "No root/sudo/wheel/docker groups found in getent output."
 fi
-cat /etc/shells || warn "Cannot read /etc/shells"
+pause_step
+show_file_with_pause "/etc/shells"
 info "Generally acceptable shells: dash, rbash, sh, bash."
 pause_step
 
 section_header "6) Check Sudo Permissions"
 if [[ -d /etc/sudoers.d ]]; then
+  show_output_source_header "DIRECTORY: /etc/sudoers.d"
   ls -la /etc/sudoers.d
+  pause_step
   find /etc/sudoers.d -maxdepth 1 -type f -print0 2>/dev/null | while IFS= read -r -d '' f; do
-    printf '\n----- %s -----\n' "$f"
-    cat "$f"
+    show_file_with_pause "$f"
   done
+else
+  show_output_source_header "DIRECTORY: /etc/sudoers.d"
+  warn "/etc/sudoers.d is missing"
+  pause_step
 fi
 if ask_yes_no "Open visudo now to inspect for unsafe directives (example: !authenticate)?" "N"; then
   if command_exists nano; then
@@ -205,43 +266,45 @@ if ask_yes_no "Open visudo now to inspect for unsafe directives (example: !authe
   fi
 fi
 if [[ -n "${SUDO_USER:-}" ]]; then
-  sudo -l -U "$SUDO_USER" || true
+  show_command_with_pause "sudo -l -U $SUDO_USER" sudo -l -U "$SUDO_USER"
 else
-  sudo -l || true
+  show_command_with_pause "sudo -l" sudo -l
 fi
-pause_step
 
 section_header "7) Session/Authentication Context"
-w || warn "w command failed"
-lastb 2>/dev/null | head -n 40 || warn "lastb unavailable (check /var/log/btmp permissions)"
-last -i 2>/dev/null | head -n 40 || warn "last -i failed"
+show_command_with_pause "w" w
+show_shell_with_pause "lastb | head -n 40" "lastb 2>/dev/null | head -n 40"
+show_shell_with_pause "last -i | head -n 40" "last -i 2>/dev/null | head -n 40"
 warn "TAKE A SCREENSHOT! w, lastb, and last -i output."
 pause_step
 
 section_header "8) Enabled Startup Services"
-systemctl list-unit-files --type=service | grep enabled || warn "Could not list enabled services"
-pause_step
+show_shell_with_pause "systemctl list-unit-files --type=service | grep enabled" "systemctl list-unit-files --type=service | grep enabled"
 
 section_header "9) Running Processes"
-ps -efH || warn "ps command failed"
-pause_step
+show_command_with_pause "ps -efH" ps -efH
 
 section_header "10) Cron Jobs"
+show_output_source_header "COMMAND: crontab -l for all users in /etc/passwd"
 while IFS=: read -r user _; do
   printf '\n=== crontab for %s ===\n' "$user"
   crontab -u "$user" -l 2>/dev/null || true
 done </etc/passwd
+pause_step
 
 read -r -p "Enter a username to edit crontab now with 'crontab -eu <user>' (blank to skip): " cron_user
 if [[ -n "$cron_user" ]]; then
   crontab -u "$cron_user" -e
 fi
-if ls /etc/cron.d/* >/dev/null 2>&1; then
-  cat /etc/cron.d/*
+if compgen -G "/etc/cron.d/*" >/dev/null; then
+  for cron_file in /etc/cron.d/*; do
+    show_file_with_pause "$cron_file"
+  done
 else
+  show_output_source_header "FILE GLOB: /etc/cron.d/*"
   warn "No files in /etc/cron.d/"
+  pause_step
 fi
-pause_step
 
 section_header "11) Save Installed Programs"
 if save_installed_packages /root/installed_apps.txt; then
@@ -251,7 +314,6 @@ pause_step
 
 section_header "12) Find Files with SUID/SGID"
 scan_suid_guid
-pause_step
 
 section_header "13) Validate File Integrity in Background"
 start_integrity_check || true
@@ -266,11 +328,12 @@ pause_step
 
 section_header "14b) Run locate search for 'password'"
 if command_exists locate; then
-  locate password | head -n 200 || true
+  show_shell_with_pause "locate password | head -n 200" "locate password | head -n 200"
 else
+  show_output_source_header "COMMAND: locate password"
   warn "locate not available"
+  pause_step
 fi
-pause_step
 
 section_header "14c) Run keyword grep search in sensitive paths"
 read -r -p "Enter first password keyword to search for (blank to skip grep scan): " pw1
@@ -278,6 +341,7 @@ read -r -p "Enter second password keyword to search for (blank to skip grep scan
 
 if [[ -n "$pw1" && -n "$pw2" ]]; then
   pattern="$(regex_escape "$pw1")|$(regex_escape "$pw2")"
+  show_output_source_header "COMMAND: find ... | grep password keywords"
   find /etc /opt /tmp /home /usr /var -type f -print0 2>/dev/null \
     | xargs -0 grep -IinH -E "$pattern" 2>/dev/null \
     | tee /root/password_pattern_hits.txt || true
@@ -288,26 +352,28 @@ fi
 pause_step
 
 section_header "15) Find World-Writable Files and Directories"
+show_output_source_header "COMMAND: find world-writable files"
 find / -xdev -type f -perm -0002 -print 2>/dev/null | tee /root/world_writable_files.txt
+pause_step
+show_output_source_header "COMMAND: find world-writable directories without sticky bit"
 find / -xdev -type d \( -perm -0002 -a ! -perm -1000 \) -print 2>/dev/null | tee /root/world_writable_dirs_no_sticky.txt
 pause_step
 
 section_header "16) Check File Mounts"
-cat /etc/fstab || warn "Cannot read /etc/fstab"
-pause_step
+show_file_with_pause "/etc/fstab"
 
 section_header "17) Review /tmp and /opt Contents"
-find /tmp /opt -mindepth 1 -maxdepth 2 -ls 2>/dev/null | sed -n '1,300p'
-pause_step
+show_shell_with_pause "find /tmp /opt -mindepth 1 -maxdepth 2 -ls | head 300" "find /tmp /opt -mindepth 1 -maxdepth 2 -ls 2>/dev/null | sed -n '1,300p'"
 
 section_header "18) Locate SSH Keys"
 if command_exists locate; then
-  locate authorized_keys || true
-  locate id_rsa || true
+  show_shell_with_pause "locate authorized_keys" "locate authorized_keys"
+  show_shell_with_pause "locate id_rsa" "locate id_rsa"
 else
+  show_output_source_header "COMMAND: locate authorized_keys / locate id_rsa"
   warn "locate not available"
+  pause_step
 fi
-pause_step
 
 section_header "19) Change Root Password"
 if ask_yes_no "Run 'passwd root' now?" "Y"; then

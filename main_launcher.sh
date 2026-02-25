@@ -63,6 +63,42 @@ pause_step() {
   read -r -p "Press Enter to continue..." _unused
 }
 
+show_output_source_header() {
+  local source_label="$1"
+  printf '\n%s############################################%s\n' "$C_WARN" "$C_RESET"
+  printf '%s# OUTPUT SOURCE: %s%s\n' "$C_WARN" "$source_label" "$C_RESET"
+  printf '%s############################################%s\n' "$C_WARN" "$C_RESET"
+}
+
+show_file_with_pause() {
+  local file_path="$1"
+  show_output_source_header "FILE: $file_path"
+  if [[ -r "$file_path" ]]; then
+    cat "$file_path"
+  elif [[ -e "$file_path" ]]; then
+    warn "File exists but is not readable: $file_path"
+  else
+    warn "File not found: $file_path"
+  fi
+  pause_step
+}
+
+show_command_with_pause() {
+  local label="$1"
+  shift
+  show_output_source_header "COMMAND: $label"
+  "$@" || warn "Command failed: $label"
+  pause_step
+}
+
+show_shell_with_pause() {
+  local label="$1"
+  local shell_cmd="$2"
+  show_output_source_header "COMMAND: $label"
+  bash -c "$shell_cmd" || warn "Command failed: $label"
+  pause_step
+}
+
 ask_yes_no() {
   local prompt="$1"
   local default="${2:-N}"

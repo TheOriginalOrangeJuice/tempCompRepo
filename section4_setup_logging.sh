@@ -130,14 +130,16 @@ pause_step
 section_header "1b) Create pspy exclude list and service file"
 write_pspy_exclude
 write_pspy_service
-pause_step
+show_file_with_pause "/root/pspy.exclude"
+show_file_with_pause "/etc/systemd/system/pspy.service"
 
 section_header "1c) Enable pspy and set log rotation"
 systemctl daemon-reload
 systemctl enable --now pspy || warn "Failed to enable/start pspy"
-systemctl --no-pager --full status pspy | sed -n '1,40p' || true
+show_shell_with_pause "systemctl status pspy | head -n 40" "systemctl --no-pager --full status pspy | sed -n '1,40p' || true"
 
 setup_pspy_logrotate
+show_file_with_pause "/etc/logrotate.d/pspy"
 info "Use: less -R +G /root/pspy.log"
 pause_step
 
@@ -148,22 +150,27 @@ pause_step
 
 section_header "2b) Download and install audit rules"
 if [[ "$AUDIT_RULES_URL" == *"INSERT_ORG"* || "$AUDIT_RULES_URL" == *"INSERT_REPO"* ]]; then
+  show_output_source_header "FILE: /etc/audit/rules.d/security.rules"
   warn "AUDIT_RULES_URL is still a placeholder. Set it before running this step in production."
+  pause_step
 else
   if download_file "$AUDIT_RULES_URL" /root/audit.rules; then
     echo "-a never,exit -F arch=b64 -S all -F exe=/root/pspy64 -k pspy" >>/root/audit.rules
     cp /root/audit.rules /etc/audit/rules.d/security.rules
     chmod 640 /etc/audit/rules.d/security.rules
     ok "Installed audit rules at /etc/audit/rules.d/security.rules"
+    show_file_with_pause "/etc/audit/rules.d/security.rules"
   else
+    show_output_source_header "FILE: /etc/audit/rules.d/security.rules"
     warn "Failed to download audit rules from $AUDIT_RULES_URL"
+    pause_step
   fi
 fi
 pause_step
 
 section_header "2c) Load rules and restart auditd"
 if command_exists augenrules; then
-  augenrules --load || warn "augenrules --load failed"
+  show_command_with_pause "augenrules --load" augenrules --load
 fi
 
 systemctl enable auditd || warn "Failed to enable auditd"
@@ -172,6 +179,7 @@ if ! systemctl restart auditd; then
   setup_auditd_override_if_needed
   systemctl restart auditd || warn "auditd restart still failing after override"
 fi
+show_shell_with_pause "systemctl status auditd | head -n 40" "systemctl --no-pager --full status auditd | sed -n '1,40p' || true"
 pause_step
 
 ok "Section 4 complete."
