@@ -112,13 +112,15 @@ show_shell_with_pause() {
 scan_suid_guid() {
   local suid_file="/root/suid_files.txt"
   local sgid_file="/root/sgid_files.txt"
-  local unexpected_file="/root/suid_unexpected.txt"
-  local allow_file="/root/suid_allowlist.txt"
+  local suid_unexpected_file="/root/suid_unexpected.txt"
+  local sgid_unexpected_file="/root/sgid_unexpected.txt"
+  local suid_allow_file="/root/suid_allowlist.txt"
+  local sgid_allow_file="/root/sgid_allowlist.txt"
 
   find / -perm -4000 -type f 2>/dev/null | sort -u >"$suid_file"
   find / -perm -2000 -type f 2>/dev/null | sort -u >"$sgid_file"
 
-  cat >"$allow_file" <<'ALLOWEOF'
+  cat >"$suid_allow_file" <<'ALLOWEOF'
 /usr/bin/chfn
 /usr/bin/chsh
 /usr/bin/fusermount
@@ -134,15 +136,34 @@ scan_suid_guid() {
 /usr/lib/openssh/ssh-keysign
 ALLOWEOF
 
-  grep -Fxv -f "$allow_file" "$suid_file" >"$unexpected_file" || true
+  cat >"$sgid_allow_file" <<'ALLOWSGIDEOF'
+/usr/bin/chage
+/usr/bin/crontab
+/usr/bin/expiry
+/usr/bin/ssh-agent
+/usr/bin/wall
+/usr/bin/write.ul
+/usr/lib/utempter/utempter
+/usr/sbin/postdrop
+/usr/sbin/postqueue
+ALLOWSGIDEOF
 
-  show_file_with_pause "$suid_file"
-  show_file_with_pause "$sgid_file"
-  show_output_source_header "FILE: $unexpected_file"
-  if [[ -s "$unexpected_file" ]]; then
-    cat "$unexpected_file"
+  grep -Fxv -f "$suid_allow_file" "$suid_file" >"$suid_unexpected_file" || true
+  grep -Fxv -f "$sgid_allow_file" "$sgid_file" >"$sgid_unexpected_file" || true
+
+  show_output_source_header "FILE: $suid_unexpected_file (unexpected SUID)"
+  if [[ -s "$suid_unexpected_file" ]]; then
+    cat "$suid_unexpected_file"
   else
     ok "No unexpected SUID entries based on current allowlist."
+  fi
+  pause_step
+
+  show_output_source_header "FILE: $sgid_unexpected_file (unexpected SGID)"
+  if [[ -s "$sgid_unexpected_file" ]]; then
+    cat "$sgid_unexpected_file"
+  else
+    ok "No unexpected SGID entries based on current allowlist."
   fi
   pause_step
 
@@ -272,9 +293,9 @@ else
 fi
 
 section_header "7) Session/Authentication Context"
-show_command_with_pause "w" w
-show_shell_with_pause "lastb | head -n 40" "lastb 2>/dev/null | head -n 40"
-show_shell_with_pause "last -i | head -n 40" "last -i 2>/dev/null | head -n 40"
+show_command_with_pause "w (who is logged in and active sessions)" w
+show_shell_with_pause "lastb | head -n 40 (failed login attempts)" "lastb 2>/dev/null | head -n 40"
+show_shell_with_pause "last -i | head -n 40 (recent successful logins with source IPs)" "last -i 2>/dev/null | head -n 40"
 warn "TAKE A SCREENSHOT! w, lastb, and last -i output."
 pause_step
 
@@ -444,7 +465,8 @@ touch "$MOVE_KEY_BIN_FLAG"
 pause_step
 
 section_header "23) Cleanup Enumeration Artifacts from /root"
-rm -f /root/suid_files.txt /root/sgid_files.txt /root/suid_unexpected.txt /root/suid_allowlist.txt
+rm -f /root/suid_files.txt /root/sgid_files.txt /root/suid_unexpected.txt /root/sgid_unexpected.txt
+rm -f /root/suid_allowlist.txt /root/sgid_allowlist.txt
 rm -f /root/world_writable_files.txt /root/world_writable_dirs_no_sticky.txt
 ok "Removed temporary SUID/SGID/world-writable output files from /root."
 pause_step

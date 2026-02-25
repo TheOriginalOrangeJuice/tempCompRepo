@@ -20,12 +20,12 @@ else
 fi
 
 # Placeholder links. Override with environment variables before running.
-SECTION1_URL="${SECTION1_URL:-https://github.com/INSERT_ORG/INSERT_REPO/raw/main/section1_enumeration.sh}"
-SECTION2_URL="${SECTION2_URL:-https://github.com/INSERT_ORG/INSERT_REPO/raw/main/section2_initial_hardening.sh}"
-SECTION3_URL="${SECTION3_URL:-https://github.com/INSERT_ORG/INSERT_REPO/raw/main/section3_password_changes.sh}"
-SECTION4_URL="${SECTION4_URL:-https://github.com/INSERT_ORG/INSERT_REPO/raw/main/section4_setup_logging.sh}"
-SECTION5_URL="${SECTION5_URL:-https://github.com/INSERT_ORG/INSERT_REPO/raw/main/section5_setup_rsyslog.sh}"
-AUDIT_RULES_URL="${AUDIT_RULES_URL:-https://github.com/INSERT_ORG/INSERT_REPO/raw/main/audit.rules}"
+SECTION1_URL="${SECTION1_URL:-https://raw.githubusercontent.com/TheOriginalOrangeJuice/tempCompRepo/refs/heads/main/section1_enumeration.sh}"
+SECTION2_URL="${SECTION2_URL:-https://raw.githubusercontent.com/TheOriginalOrangeJuice/tempCompRepo/refs/heads/main/section2_initial_hardening.sh}"
+SECTION3_URL="${SECTION3_URL:-https://raw.githubusercontent.com/TheOriginalOrangeJuice/tempCompRepo/refs/heads/main/section3_password_changes.sh}"
+SECTION4_URL="${SECTION4_URL:-https://raw.githubusercontent.com/TheOriginalOrangeJuice/tempCompRepo/refs/heads/main/section4_setup_logging.sh}"
+SECTION5_URL="${SECTION5_URL:-https://raw.githubusercontent.com/TheOriginalOrangeJuice/tempCompRepo/refs/heads/main/section5_setup_rsyslog.sh}"
+AUDIT_RULES_URL="${AUDIT_RULES_URL:-https://raw.githubusercontent.com/TheOriginalOrangeJuice/tempCompRepo/refs/heads/main/audit.rules}"
 export SECTION1_URL SECTION2_URL SECTION3_URL SECTION4_URL SECTION5_URL AUDIT_RULES_URL
 
 log_line() {
