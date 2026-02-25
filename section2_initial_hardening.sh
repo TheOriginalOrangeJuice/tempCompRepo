@@ -108,7 +108,7 @@ restart_ssh_service() {
 apply_sysctl_hardening() {
   local cfg="/etc/sysctl.conf"
 
-  backup_file "$cfg" /root/backups || true
+  backup_file "$cfg" /root/backup || true
 
   while read -r key value; do
     [[ -z "$key" ]] && continue
@@ -173,20 +173,25 @@ if ask_yes_no "Move listed binaries into /root/binaries now?" "N"; then
     /usr/bin/wget /usr/bin/curl /usr/bin/scp /usr/bin/rsync /usr/bin/nc /usr/bin/socat \
     /usr/bin/ftp /usr/bin/tftp /usr/bin/telnet /usr/bin/nmap \
     /usr/bin/gcc /usr/bin/make /usr/bin/perl \
-    /usr/bin/chmod /usr/bin/chown \
     /usr/bin/crontab /usr/bin/at; do
     if [[ -e "$b" ]]; then
       mv "$b" /root/binaries/ && ok "Moved $b"
     fi
   done
-  info 'If needed: export PATH="$PATH:/root/binaries"'
+  if [[ ":$PATH:" != *":/root/binaries:"* ]]; then
+    export PATH="$PATH:/root/binaries"
+  fi
+  ok "Updated current PATH to include /root/binaries"
 else
   info "Skipped binary move step."
 fi
 pause_step
 
 section_header "2) Manage Groups and /etc/group"
-cat /etc/group || warn "Cannot read /etc/group"
+print_groups_highlighted || warn "Could not enumerate groups with getent"
+if ! getent group | awk -F: '{print $1}' | grep -Eq '^(root|sudo|wheel|docker)$'; then
+  warn "No root/sudo/wheel/docker groups found in getent output."
+fi
 if ask_yes_no "Open /etc/group in an editor now?" "N"; then
   open_in_editor /etc/group
 fi
@@ -220,11 +225,18 @@ pause_step
 
 section_header "4) Remove Unwanted Installed Programs"
 if [[ -f /root/installed_apps.txt ]]; then
-  sed -n '1,200p' /root/installed_apps.txt
+  section_header "4a) Review Full Installed Application List"
+  if command_exists less; then
+    less /root/installed_apps.txt
+  else
+    cat /root/installed_apps.txt
+  fi
+  pause_step
 else
   warn "/root/installed_apps.txt not found. Run Section 1 first for package inventory."
 fi
 
+section_header "4b) Remove Selected Packages"
 read -r -p "Enter package names to uninstall (space-separated, blank to skip): " remove_line
 if [[ -n "$remove_line" ]]; then
   # shellcheck disable=SC2206
@@ -293,18 +305,18 @@ fi
 pause_step
 
 section_header "10) Backup Users and Password Files"
-mkdir -p /root/bkp
-cp -a /etc/passwd /root/bkp/passwd.bak
-cp -a /etc/shadow /root/bkp/shadow.bak
-cp -a /etc/group /root/bkp/group.bak
-ok "Backups saved in /root/bkp"
+mkdir -p /root/backup
+cp -a /etc/passwd /root/backup/passwd.bak
+cp -a /etc/shadow /root/backup/shadow.bak
+cp -a /etc/group /root/backup/group.bak
+ok "Backups saved in /root/backup"
 pause_step
 
 section_header "11) Update SSH Configuration"
 if [[ ! -f /etc/ssh/sshd_config ]]; then
   warn "/etc/ssh/sshd_config not found; skipping SSH hardening step."
 else
-  backup_file /etc/ssh/sshd_config /root/backups || true
+  backup_file /etc/ssh/sshd_config /root/backup || true
 
   if ask_yes_no "Is SSH a scored service? (recommended default: yes)" "Y"; then
     ssh_scored="yes"
@@ -321,7 +333,7 @@ else
 
     if [[ "$ssh_scored" == "yes" ]]; then
       password_auth="yes"
-      auth_methods="publickey,password"
+      auth_methods="any"
     fi
 
     ensure_sshd_include_dir

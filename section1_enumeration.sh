@@ -10,6 +10,7 @@ require_root "$@"
 TARGET_USER="${SUDO_USER:-root}"
 TARGET_HOME="$(getent passwd "$TARGET_USER" | awk -F: '{print $6}')"
 TARGET_HOME="${TARGET_HOME:-/root}"
+MOVE_KEY_BIN_FLAG="/root/.key_binary_move_prompt_done"
 
 find_integrity_runner() {
   if command_exists dpkg; then
@@ -124,14 +125,14 @@ else
 fi
 pause_step
 
-section_header "2) Services and Ports (Screenshot Prompt)"
+section_header "2) Services and Ports"
 list_listening_sockets || true
 if command_exists lsof; then
   lsof -i -n -P || warn "lsof command failed"
 else
   warn "lsof not installed"
 fi
-info "Take a screenshot of the open ports and network services now."
+warn "TAKE A SCREENSHOT! Open ports and network services."
 pause_step
 
 section_header "3) DNS, LDAP, SSSD, Kerberos Checks"
@@ -180,7 +181,10 @@ if [[ -r /etc/passwd ]]; then
     print line
   }' /etc/passwd
 fi
-getent group | grep -E '^(wheel|sudo|root):' || warn "wheel/sudo/root group entries not found"
+print_groups_highlighted || warn "Could not enumerate groups with getent"
+if ! getent group | awk -F: '{print $1}' | grep -Eq '^(root|sudo|wheel|docker)$'; then
+  warn "No root/sudo/wheel/docker groups found in getent output."
+fi
 cat /etc/shells || warn "Cannot read /etc/shells"
 info "Generally acceptable shells: dash, rbash, sh, bash."
 pause_step
@@ -207,11 +211,11 @@ else
 fi
 pause_step
 
-section_header "7) Session/Authentication Context (Screenshot Prompt)"
+section_header "7) Session/Authentication Context"
 w || warn "w command failed"
 lastb 2>/dev/null | head -n 40 || warn "lastb unavailable (check /var/log/btmp permissions)"
 last -i 2>/dev/null | head -n 40 || warn "last -i failed"
-info "Take screenshots of w, lastb, and last -i outputs now."
+warn "TAKE A SCREENSHOT! w, lastb, and last -i output."
 pause_step
 
 section_header "8) Enabled Startup Services"
@@ -241,8 +245,7 @@ pause_step
 
 section_header "11) Save Installed Programs"
 if save_installed_packages /root/installed_apps.txt; then
-  sed -n '1,200p' /root/installed_apps.txt
-  info "Full list is available at /root/installed_apps.txt"
+  ok "Installed applications saved to /root/installed_apps.txt"
 fi
 pause_step
 
@@ -255,22 +258,32 @@ start_integrity_check || true
 pause_step
 
 section_header "14) Install mlocate/plocate and Search for Password Artifacts"
+section_header "14a) Install locate tooling and update database"
 if ensure_locate_tool; then
   updatedb || warn "updatedb failed"
+fi
+pause_step
+
+section_header "14b) Run locate search for 'password'"
+if command_exists locate; then
   locate password | head -n 200 || true
+else
+  warn "locate not available"
+fi
+pause_step
 
-  read -r -p "Enter first password keyword to search for (blank to skip grep scan): " pw1
-  read -r -p "Enter second password keyword to search for (blank to skip grep scan): " pw2
+section_header "14c) Run keyword grep search in sensitive paths"
+read -r -p "Enter first password keyword to search for (blank to skip grep scan): " pw1
+read -r -p "Enter second password keyword to search for (blank to skip grep scan): " pw2
 
-  if [[ -n "$pw1" && -n "$pw2" ]]; then
-    pattern="$(regex_escape "$pw1")|$(regex_escape "$pw2")"
-    find /etc /opt /tmp /home /usr /var -type f -print0 2>/dev/null \
-      | xargs -0 grep -IinH -E "$pattern" 2>/dev/null \
-      | tee /root/password_pattern_hits.txt || true
-    info "Password pattern hits saved to /root/password_pattern_hits.txt"
-  else
-    warn "Skipping pattern grep because both keywords were not provided."
-  fi
+if [[ -n "$pw1" && -n "$pw2" ]]; then
+  pattern="$(regex_escape "$pw1")|$(regex_escape "$pw2")"
+  find /etc /opt /tmp /home /usr /var -type f -print0 2>/dev/null \
+    | xargs -0 grep -IinH -E "$pattern" 2>/dev/null \
+    | tee /root/password_pattern_hits.txt || true
+  info "Password pattern hits saved to /root/password_pattern_hits.txt"
+else
+  warn "Skipping pattern grep because both keywords were not provided."
 fi
 pause_step
 
@@ -339,7 +352,9 @@ pause_step
 
 section_header "22) Move Key Binaries (High-Risk)"
 warn "Moving sudo/chattr can lock out normal administration paths."
-if ask_yes_no "Proceed with moving chattr and sudo binaries to /root/.wow_bin_*?" "N"; then
+if [[ -f "$MOVE_KEY_BIN_FLAG" ]]; then
+  info "Move prompt has already been answered once on this host. Skipping."
+elif ask_yes_no "Proceed with moving chattr and sudo binaries to /root/.wow_bin_*?" "N"; then
   chattr_path="$(command -v chattr || true)"
   sudo_path="$(command -v sudo || true)"
 
@@ -359,6 +374,13 @@ if ask_yes_no "Proceed with moving chattr and sudo binaries to /root/.wow_bin_*?
 else
   info "Skipped moving sudo/chattr binaries."
 fi
+touch "$MOVE_KEY_BIN_FLAG"
+pause_step
+
+section_header "23) Cleanup Enumeration Artifacts from /root"
+rm -f /root/suid_files.txt /root/sgid_files.txt /root/suid_unexpected.txt /root/suid_allowlist.txt
+rm -f /root/world_writable_files.txt /root/world_writable_dirs_no_sticky.txt
+ok "Removed temporary SUID/SGID/world-writable output files from /root."
 pause_step
 
 ok "Section 1 complete."

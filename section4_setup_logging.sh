@@ -57,9 +57,12 @@ write_pspy_exclude() {
 /etc/protocols
 /etc/update-motd.d/
 /etc/lsb-release
+/usr/bin/lsb_release
 /etc/machine-id
 /var/log/
 /var/lib/
+/root/pspy.log
+/root/.lesshst
 EOF_EXCLUDE
   chmod 600 /root/pspy.exclude
   ok "Created /root/pspy.exclude"
@@ -115,16 +118,21 @@ EOF_OVR
 section_header "Section 4 - Setup Logging"
 
 section_header "1) Configure pspy"
+section_header "1a) Download pspy binary"
 if download_file "$PSPY_URL" /root/pspy64; then
   chmod +x /root/pspy64
   ok "Downloaded pspy to /root/pspy64"
 else
   warn "Failed to download pspy from: $PSPY_URL"
 fi
+pause_step
 
+section_header "1b) Create pspy exclude list and service file"
 write_pspy_exclude
 write_pspy_service
+pause_step
 
+section_header "1c) Enable pspy and set log rotation"
 systemctl daemon-reload
 systemctl enable --now pspy || warn "Failed to enable/start pspy"
 systemctl --no-pager --full status pspy | sed -n '1,40p' || true
@@ -134,8 +142,11 @@ info "Use: less -R +G /root/pspy.log"
 pause_step
 
 section_header "2) Auditd Setup"
+section_header "2a) Install auditd packages"
 install_audit_packages || warn "Audit package installation had issues"
+pause_step
 
+section_header "2b) Download and install audit rules"
 if [[ "$AUDIT_RULES_URL" == *"INSERT_ORG"* || "$AUDIT_RULES_URL" == *"INSERT_REPO"* ]]; then
   warn "AUDIT_RULES_URL is still a placeholder. Set it before running this step in production."
 else
@@ -148,7 +159,9 @@ else
     warn "Failed to download audit rules from $AUDIT_RULES_URL"
   fi
 fi
+pause_step
 
+section_header "2c) Load rules and restart auditd"
 if command_exists augenrules; then
   augenrules --load || warn "augenrules --load failed"
 fi

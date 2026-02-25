@@ -158,7 +158,7 @@ remove_packages() {
 
 backup_file() {
   local src="$1"
-  local backup_dir="${2:-/root/backups}"
+  local backup_dir="${2:-/root/backup}"
   local stamp
   local dest
 
@@ -253,6 +253,25 @@ open_in_editor() {
   fi
 
   "$editor" "$target"
+}
+
+print_groups_highlighted() {
+  local hi reset
+  if [[ -t 1 ]]; then
+    hi=$'\033[1;33m'
+    reset=$'\033[0m'
+  else
+    hi=""
+    reset=""
+  fi
+
+  getent group | awk -F: -v hi="$hi" -v reset="$reset" '{
+    if ($1=="root" || $1=="sudo" || $1=="wheel" || $1=="docker") {
+      print hi $0 reset
+    } else {
+      print $0
+    }
+  }'
 }
 
 disable_service_if_present() {
