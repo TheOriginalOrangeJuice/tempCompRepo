@@ -20,12 +20,14 @@ else
 fi
 
 # Placeholder links. Override with environment variables before running.
-SECTION1_URL="${SECTION1_URL:-https://raw.githubusercontent.com/TheOriginalOrangeJuice/tempCompRepo/refs/heads/main/section1_enumeration.sh}"
-SECTION2_URL="${SECTION2_URL:-https://raw.githubusercontent.com/TheOriginalOrangeJuice/tempCompRepo/refs/heads/main/section2_initial_hardening.sh}"
-SECTION3_URL="${SECTION3_URL:-https://raw.githubusercontent.com/TheOriginalOrangeJuice/tempCompRepo/refs/heads/main/section3_password_changes.sh}"
-SECTION4_URL="${SECTION4_URL:-https://raw.githubusercontent.com/TheOriginalOrangeJuice/tempCompRepo/refs/heads/main/section4_setup_logging.sh}"
-SECTION5_URL="${SECTION5_URL:-https://raw.githubusercontent.com/TheOriginalOrangeJuice/tempCompRepo/refs/heads/main/section5_setup_rsyslog.sh}"
-AUDIT_RULES_URL="${AUDIT_RULES_URL:-https://raw.githubusercontent.com/TheOriginalOrangeJuice/tempCompRepo/refs/heads/main/audit.rules}"
+BASE="https://raw.githubusercontent.com/SouthwestCCDC/2026-Regionals-Shared/main/The%20University%20of%20Texas%20at%20San%20Antonio/2026_Linux"
+
+SECTION1_URL="${SECTION1_URL:-$BASE/section1_enumeration.sh}"
+SECTION2_URL="${SECTION2_URL:-$BASE/section2_initial_hardening.sh}"
+SECTION3_URL="${SECTION3_URL:-$BASE/section3_password_changes.sh}"
+SECTION4_URL="${SECTION4_URL:-$BASE/section4_setup_logging.sh}"
+SECTION5_URL="${SECTION5_URL:-$BASE/section5_setup_rsyslog.sh}"
+AUDIT_RULES_URL="${AUDIT_RULES_URL:-$BASE/audit.rules}"
 export SECTION1_URL SECTION2_URL SECTION3_URL SECTION4_URL SECTION5_URL AUDIT_RULES_URL
 
 log_line() {
