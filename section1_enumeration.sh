@@ -11,6 +11,10 @@ TARGET_USER="${SUDO_USER:-root}"
 TARGET_HOME="$(getent passwd "$TARGET_USER" | awk -F: '{print $6}')"
 TARGET_HOME="${TARGET_HOME:-/root}"
 MOVE_KEY_BIN_FLAG="/root/.key_binary_move_prompt_done"
+TH_DIR="/root/threatHunting_files"
+TH_BASELINE_DIR="$TH_DIR/baseline"
+TH_BASELINE_EPOCH_FILE="$TH_DIR/baseline_epoch"
+TH_BASELINE_PSPY_TS_FILE="$TH_DIR/baseline_pspy_ts"
 SUID_FILE="/root/suid_files.txt"
 SGID_FILE="/root/sgid_files.txt"
 SUID_UNEXPECTED_FILE="/root/suid_unexpected.txt"
@@ -157,6 +161,116 @@ configure_user_sudo_access() {
 
   if [[ "$configured_any" -eq 0 ]]; then
     info "No per-user sudo copies were configured."
+  fi
+}
+
+normalize_threat_snapshot_for_baseline() {
+  local snapshot_name="$1"
+  local raw_file="$2"
+
+  case "$snapshot_name" in
+    sockets)
+      awk 'NR > 1 && NF {
+        gsub(/[[:space:]]+/, " ")
+        sub(/^ /, "")
+        print
+      }' "$raw_file" | sort -u
+      ;;
+    lsof)
+      awk 'NR > 1 && NF {
+        $2 = ""
+        gsub(/[[:space:]]+/, " ")
+        sub(/^ /, "")
+        print
+      }' "$raw_file" | sort -u
+      ;;
+    w)
+      awk 'NR > 2 && NF {
+        gsub(/[[:space:]]+/, " ")
+        sub(/^ /, "")
+        print
+      }' "$raw_file" | sort -u
+      ;;
+    lastb)
+      awk 'NF && $0 !~ /^btmp begins/ {
+        gsub(/[[:space:]]+/, " ")
+        sub(/^ /, "")
+        print
+      }' "$raw_file"
+      ;;
+    last_i)
+      awk 'NF && $0 !~ /^wtmp begins/ {
+        gsub(/[[:space:]]+/, " ")
+        sub(/^ /, "")
+        print
+      }' "$raw_file"
+      ;;
+    *)
+      cat "$raw_file"
+      ;;
+  esac
+}
+
+seed_threat_hunting_baseline_if_missing() {
+  local temp_dir="$TH_DIR/.baseline_seed_$$"
+  local snapshot_name raw_file norm_file baseline_raw baseline_norm
+  local created_any=0
+  local baseline_epoch baseline_pspy_ts
+
+  mkdir -p "$TH_BASELINE_DIR" "$temp_dir"
+
+  for snapshot_name in sockets lsof w lastb last_i; do
+    baseline_raw="$TH_BASELINE_DIR/${snapshot_name}.raw"
+    baseline_norm="$TH_BASELINE_DIR/${snapshot_name}.norm"
+
+    if [[ -f "$baseline_raw" && -f "$baseline_norm" ]]; then
+      continue
+    fi
+
+    raw_file="$temp_dir/${snapshot_name}.raw"
+    norm_file="$temp_dir/${snapshot_name}.norm"
+
+    case "$snapshot_name" in
+      sockets)
+        list_listening_sockets >"$raw_file" 2>&1 || true
+        ;;
+      lsof)
+        if command_exists lsof; then
+          lsof -i -n -P >"$raw_file" 2>&1 || true
+        else
+          printf '%s\n' "lsof command not available" >"$raw_file"
+        fi
+        ;;
+      w)
+        w >"$raw_file" 2>&1 || true
+        ;;
+      lastb)
+        lastb 2>/dev/null | head -n 40 >"$raw_file"
+        ;;
+      last_i)
+        last -i 2>/dev/null | head -n 40 >"$raw_file"
+        ;;
+    esac
+
+    normalize_threat_snapshot_for_baseline "$snapshot_name" "$raw_file" >"$norm_file"
+    cp -a "$raw_file" "$baseline_raw"
+    cp -a "$norm_file" "$baseline_norm"
+    created_any=1
+  done
+
+  rm -rf "$temp_dir"
+
+  if [[ "$created_any" -eq 1 || ! -s "$TH_BASELINE_EPOCH_FILE" || ! -s "$TH_BASELINE_PSPY_TS_FILE" ]]; then
+    baseline_epoch="$(date +%s)"
+    baseline_pspy_ts="$(date '+%Y/%m/%d %H:%M:%S')"
+    printf '%s\n' "$baseline_epoch" >"$TH_BASELINE_EPOCH_FILE"
+    printf '%s\n' "$baseline_pspy_ts" >"$TH_BASELINE_PSPY_TS_FILE"
+  fi
+
+  if [[ "$created_any" -eq 1 ]]; then
+    ok "Threat hunting baseline seeded under $TH_BASELINE_DIR"
+  else
+    info "Threat hunting baseline already exists under $TH_BASELINE_DIR"
   fi
 }
 
@@ -356,6 +470,10 @@ show_command_with_pause "w (who is logged in and active sessions)" w
 show_shell_with_pause "lastb | head -n 40 (failed login attempts)" "lastb 2>/dev/null | head -n 40"
 show_shell_with_pause "last -i | head -n 40 (recent successful logins with source IPs)" "last -i 2>/dev/null | head -n 40"
 warn "TAKE A SCREENSHOT! w, lastb, and last -i output."
+pause_step
+
+section_header "7b) Seed Threat Hunting Baseline"
+seed_threat_hunting_baseline_if_missing
 pause_step
 
 section_header "8) Enabled Startup Services"

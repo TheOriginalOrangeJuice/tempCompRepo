@@ -7,6 +7,7 @@
 - `section3_password_changes.sh`
 - `section4_setup_logging.sh`
 - `section5_setup_rsyslog.sh`
+- `section6_threat_hunting.sh`
 
 ## Run
 ```bash
@@ -22,6 +23,7 @@ export SECTION2_URL="https://github.com/ORG/REPO/raw/main/section2_initial_harde
 export SECTION3_URL="https://github.com/ORG/REPO/raw/main/section3_password_changes.sh"
 export SECTION4_URL="https://github.com/ORG/REPO/raw/main/section4_setup_logging.sh"
 export SECTION5_URL="https://github.com/ORG/REPO/raw/main/section5_setup_rsyslog.sh"
+export SECTION6_URL="https://github.com/ORG/REPO/raw/main/section6_threat_hunting.sh"
 export AUDIT_RULES_URL="https://github.com/ORG/REPO/raw/main/audit.rules"
 ```
 
@@ -29,3 +31,4 @@ export AUDIT_RULES_URL="https://github.com/ORG/REPO/raw/main/audit.rules"
 - Scripts are intentionally interactive and pause between checklist blocks.
 - High-risk actions (moving binaries, disabling services) are confirmation-gated.
 - Output and actions are logged to `/root/linux_hardening.log`.
+- Threat hunting snapshots and reports are stored under `/root/threatHunting_files`.
