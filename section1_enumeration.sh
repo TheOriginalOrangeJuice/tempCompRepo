@@ -116,6 +116,50 @@ show_shell_with_pause() {
   pause_step
 }
 
+configure_user_sudo_access() {
+  local moved_sudo="$1"
+  local raw_users user home bashrc user_group
+  local configured_any=0
+
+  read -r -p "Enter users who still need sudo access (comma-separated, blank for none): " raw_users
+  [[ -z "$raw_users" ]] && return 0
+
+  while IFS= read -r user; do
+    [[ -z "$user" ]] && continue
+
+    if ! getent passwd "$user" >/dev/null 2>&1; then
+      warn "User not found, skipping sudo copy: $user"
+      continue
+    fi
+
+    home="$(getent passwd "$user" | awk -F: '{print $6}')"
+    if [[ -z "$home" || ! -d "$home" ]]; then
+      warn "Home directory not found for $user, skipping."
+      continue
+    fi
+
+    install -d -m 755 -o root -g root "$home/binaries"
+    cp -a "$moved_sudo" "$home/binaries/sudo"
+    chown root:root "$home/binaries/sudo"
+    chmod 4755 "$home/binaries/sudo"
+
+    bashrc="$home/.bashrc"
+    [[ -f "$bashrc" ]] || touch "$bashrc"
+    if ! grep -Fq 'export PATH="$PATH:$HOME/binaries"' "$bashrc" 2>/dev/null; then
+      printf '\nexport PATH="$PATH:$HOME/binaries"\n' >>"$bashrc"
+    fi
+    user_group="$(id -gn "$user" 2>/dev/null || printf '%s' "$user")"
+    chown "$user":"$user_group" "$bashrc" 2>/dev/null || true
+
+    ok "Provisioned $home/binaries/sudo for $user and updated $bashrc"
+    configured_any=1
+  done < <(printf '%s\n' "$raw_users" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+
+  if [[ "$configured_any" -eq 0 ]]; then
+    info "No per-user sudo copies were configured."
+  fi
+}
+
 start_suid_guid_scan_bg() {
   cat >"$SUID_ALLOW_FILE" <<'ALLOWEOF'
 /usr/bin/chfn
@@ -318,7 +362,9 @@ section_header "8) Enabled Startup Services"
 show_shell_with_pause "systemctl list-unit-files --type=service | grep enabled" "systemctl list-unit-files --type=service | grep enabled"
 
 section_header "9) Running Processes"
-show_command_with_pause "ps -efH" ps -efH
+show_output_source_header "COMMAND: ps -efH"
+ps -efH | awk 'NR==1 {print; next} $1=="root" {print "\033[1;31m" $0 "\033[0m"; next} {print}'
+pause_step
 
 section_header "10) Cron Jobs"
 show_output_source_header "COMMAND: crontab -l for all users in /etc/passwd"
@@ -357,7 +403,7 @@ section_header "13) Validate File Integrity in Background"
 start_integrity_check || true
 pause_step
 
-section_header "14) Install mlocate/plocate and Search for Password Artifacts"
+section_header "14) Install mlocate/plocate and Search for Password/Keytab Artifacts"
 section_header "14a) Install locate tooling and update database"
 if ensure_locate_tool; then
   updatedb || warn "updatedb failed"
@@ -373,21 +419,14 @@ else
   pause_step
 fi
 
-section_header "14c) Run keyword grep search in sensitive paths"
-read -r -p "Enter first password keyword to search for (blank to skip grep scan): " pw1
-read -r -p "Enter second password keyword to search for (blank to skip grep scan): " pw2
-
-if [[ -n "$pw1" && -n "$pw2" ]]; then
-  pattern="$(regex_escape "$pw1")|$(regex_escape "$pw2")"
-  show_output_source_header "COMMAND: find ... | grep password keywords"
-  find /etc /opt /tmp /home /usr /var -type f -print0 2>/dev/null \
-    | xargs -0 grep -IinH -E "$pattern" 2>/dev/null \
-    | tee /root/password_pattern_hits.txt || true
-  info "Password pattern hits saved to /root/password_pattern_hits.txt"
+section_header "14c) Run locate search for '.keytab'"
+if command_exists locate; then
+  show_shell_with_pause "locate --regex '\\.keytab$' | head -n 200" "locate --regex '\\.keytab$' 2>/dev/null | head -n 200"
 else
-  warn "Skipping pattern grep because both keywords were not provided."
+  show_output_source_header "COMMAND: locate --regex '\\.keytab$'"
+  warn "locate not available"
+  pause_step
 fi
-pause_step
 
 section_header "15) Find World-Writable Files and Directories"
 show_output_source_header "COMMAND: find world-writable files"
@@ -457,7 +496,7 @@ section_header "22) Manual Validation Prompt"
 info "Test SSH connectivity in a separate terminal now before continuing."
 pause_step
 
-section_header "23) Move Key Binaries (High-Risk)"
+section_header "23) Move SUDO/CHATTR Binary"
 warn "Moving sudo/chattr can lock out normal administration paths."
 if [[ -f "$MOVE_KEY_BIN_FLAG" ]]; then
   info "Move prompt has already been answered once on this host. Skipping."
@@ -475,6 +514,7 @@ elif ask_yes_no "Proceed with moving chattr and sudo binaries to /root/.wow_bin_
   if [[ -n "$sudo_path" && -x "$sudo_path" ]]; then
     mv "$sudo_path" /root/.wow_bin_s
     ok "Moved $sudo_path -> /root/.wow_bin_s"
+    configure_user_sudo_access /root/.wow_bin_s
   else
     warn "sudo binary not found"
   fi
