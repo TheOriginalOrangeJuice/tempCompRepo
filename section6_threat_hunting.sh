@@ -25,10 +25,17 @@ CURRENT_EPOCH="$(date +%s)"
 CURRENT_PSPY_TS="$(date '+%Y/%m/%d %H:%M:%S')"
 SUSPICIOUS_CMD_NAMES="bash,sh,dash,rbash,python,python3,perl,php,ruby,lua,nc,ncat,netcat,socat,curl,wget,ftp,tftp,scp,rsync,chmod,chown,chattr,setcap,getcap,systemctl,service,update-rc.d,chkconfig,crontab,at,atd,useradd,usermod,userdel,adduser,deluser,passwd,chpasswd,vipw,chage,groupadd,groupmod,gpasswd,sudo,visudo,ssh-keygen"
 PSPY_CREATE_PREFIXES="/tmp/,/var/tmp/,/dev/shm/,/opt/,/home/,/root/,/usr/bin/,/usr/sbin/,/bin/,/sbin/"
+AUDIT_CREDENTIAL_TYPES="USER_ACCT,USER_AUTH,USER_CMD,USER_CHAUTHTOK,USER_START,USER_END,CRED_ACQ,CRED_DISP,ADD_USER,DEL_USER,ADD_GROUP,DEL_GROUP,CHUSER_ID,CHGRP_ID"
 PREVIOUS_RUN_DIR=""
+COMPARISON_DIR=""
+COMPARISON_LABEL=""
 BASELINE_CREATED=0
 LOG_WINDOW_START_EPOCH=""
 LOG_WINDOW_START_PSPY_TS=""
+AUDIT_WINDOW_START_DATE=""
+AUDIT_WINDOW_START_TIME=""
+AUDIT_WINDOW_END_DATE=""
+AUDIT_WINDOW_END_TIME=""
 
 ensure_threat_hunting_dirs() {
   mkdir -p "$BASELINE_DIR" "$RUNS_DIR" "$CURRENT_RUN_DIR" "$REPORT_DIR" "$LOG_SNAPSHOT_DIR"
@@ -170,6 +177,23 @@ load_log_review_window() {
 
   info "Log review window start source: $source_label"
   info "Log review window: $LOG_WINDOW_START_PSPY_TS -> $CURRENT_PSPY_TS"
+
+  AUDIT_WINDOW_START_DATE="$(date -d "@$LOG_WINDOW_START_EPOCH" '+%m/%d/%Y')"
+  AUDIT_WINDOW_START_TIME="$(date -d "@$LOG_WINDOW_START_EPOCH" '+%H:%M:%S')"
+  AUDIT_WINDOW_END_DATE="$(date -d "@$CURRENT_EPOCH" '+%m/%d/%Y')"
+  AUDIT_WINDOW_END_TIME="$(date -d "@$CURRENT_EPOCH" '+%H:%M:%S')"
+}
+
+set_comparison_target() {
+  if [[ -n "$PREVIOUS_RUN_DIR" ]]; then
+    COMPARISON_DIR="$PREVIOUS_RUN_DIR"
+    COMPARISON_LABEL="Last Run"
+  else
+    COMPARISON_DIR="$BASELINE_DIR"
+    COMPARISON_LABEL="Baseline"
+  fi
+
+  info "Comparison target: $COMPARISON_LABEL"
 }
 
 print_colorized_diff() {
@@ -247,6 +271,36 @@ show_text_report() {
   show_output_source_header "REPORT: $report_file"
   if [[ -s "$report_file" ]]; then
     cat "$report_file"
+  else
+    printf '%s\n' "none"
+  fi
+  pause_step
+}
+
+print_highlighted_audit_report() {
+  local report_file="$1"
+
+  awk -v type_hi="$C_WARN" -v proc_hi="$C_OK" -v reset="$C_RESET" '
+    {
+      line = $0
+      gsub(/type=[A-Z_]+/, type_hi "&" reset, line)
+      if ($0 ~ /^[[:space:]]*type=PROCTITLE/) {
+        print proc_hi line reset
+      } else {
+        print line
+      }
+    }
+  ' "$report_file"
+}
+
+show_audit_report() {
+  local title="$1"
+  local report_file="$2"
+
+  section_header "$title"
+  show_output_source_header "REPORT: $report_file"
+  if [[ -s "$report_file" ]]; then
+    print_highlighted_audit_report "$report_file"
   else
     printf '%s\n' "none"
   fi
@@ -373,18 +427,46 @@ generate_pspy_create_hits() {
 
 generate_audit_rootcmd_hits() {
   local out="$REPORT_DIR/audit_rootcmd_suspicious_commands.txt"
-  local self_noise='(pspy64|pspy\.exclude|main_launcher\.sh|section[0-9]_[A-Za-z0-9_]+\.sh)'
+  local ausearch_out="$REPORT_DIR/audit_rootcmd_ausearch_full.txt"
 
   : >"$out"
+  : >"$ausearch_out"
   [[ -r "$AUDIT_LOG_SNAPSHOT" ]] || return 0
+  if ! command_exists ausearch; then
+    warn "ausearch not available; skipping interpreted audit rootcmd review."
+    return 0
+  fi
 
-  awk -v start="$LOG_WINDOW_START_EPOCH" \
-      -v end="$CURRENT_EPOCH" \
-      -v cmd_list="$SUSPICIOUS_CMD_NAMES" \
-      -v self_noise="$self_noise" '
-    function base_name(path) {
-      sub(/^.*\//, "", path)
-      return path
+  LC_ALL=C ausearch -if "$AUDIT_LOG_SNAPSHOT" -i -k rootcmd \
+    -ts "$AUDIT_WINDOW_START_DATE" "$AUDIT_WINDOW_START_TIME" \
+    -te "$AUDIT_WINDOW_END_DATE" "$AUDIT_WINDOW_END_TIME" >"$ausearch_out" 2>/dev/null || true
+
+  awk -v cmd_list="$SUSPICIOUS_CMD_NAMES" '
+    function token_is_suspicious(line,   count, i, tok, pieces) {
+      count = split(line, pieces, /[^[:alnum:]_\/.+-]+/)
+      for (i = 1; i <= count; i++) {
+        tok = pieces[i]
+        if (tok == "") {
+          continue
+        }
+        sub(/^.*\//, "", tok)
+        if (tok in allow) {
+          return 1
+        }
+      }
+      return 0
+    }
+    function flush_event() {
+      if (event_seen && event_match) {
+        printf "%s", block
+        if (block !~ /\n$/) {
+          printf "\n"
+        }
+        printf "\n"
+      }
+      block = ""
+      event_seen = 0
+      event_match = 0
     }
     BEGIN {
       count = split(cmd_list, names, ",")
@@ -392,89 +474,46 @@ generate_audit_rootcmd_hits() {
         allow[names[i]] = 1
       }
     }
+    /^----/ {
+      flush_event()
+      block = $0 ORS
+      event_seen = 1
+      next
+    }
+    /^$/ {
+      flush_event()
+      next
+    }
     {
-      if (!match($0, /msg=audit\(([0-9]+)(\.[0-9]+)?:([0-9]+)\)/, meta)) {
-        next
+      block = block $0 ORS
+      event_seen = 1
+      if ($0 ~ /^type=(SYSCALL|EXECVE|PROCTITLE)/ && token_is_suspicious($0)) {
+        event_match = 1
       }
-
-      epoch = meta[1] + 0
-      msg_id = meta[3]
-
-      if ($0 ~ /^type=EXECVE /) {
-        execve[msg_id] = $0
-        next
-      }
-
-      if ($0 ~ /^type=PROCTITLE /) {
-        proctitle[msg_id] = $0
-        next
-      }
-
-      if ($0 !~ /^type=SYSCALL / || $0 !~ /key="rootcmd"/) {
-        next
-      }
-
-      if (epoch <= start || epoch > end) {
-        next
-      }
-
-      exe = ""
-      comm = ""
-      if (match($0, /exe="([^"]+)"/, exe_match)) {
-        exe = base_name(exe_match[1])
-      }
-      if (match($0, /comm="([^"]+)"/, comm_match)) {
-        comm = base_name(comm_match[1])
-      }
-
-      if (!(exe in allow) && !(comm in allow)) {
-        next
-      }
-
-      hit[msg_id] = $0
-      ordered[++hit_count] = msg_id
     }
     END {
-      for (i = 1; i <= hit_count; i++) {
-        msg_id = ordered[i]
-        if ((msg_id in execve) && execve[msg_id] ~ self_noise) {
-          continue
-        }
-        print hit[msg_id]
-        if (msg_id in execve) {
-          print "    " execve[msg_id]
-        } else if (msg_id in proctitle) {
-          print "    " proctitle[msg_id]
-        }
-        print ""
-      }
+      flush_event()
     }
-  ' "$AUDIT_LOG_SNAPSHOT" >"$out"
+  ' "$ausearch_out" >"$out"
 }
 
 generate_audit_credential_hits() {
   local out="$REPORT_DIR/audit_credential_account_hits.txt"
+  local ausearch_out="$REPORT_DIR/audit_credential_ausearch_full.txt"
 
   : >"$out"
   [[ -r "$AUDIT_LOG_SNAPSHOT" ]] || return 0
+  : >"$ausearch_out"
+  if ! command_exists ausearch; then
+    warn "ausearch not available; skipping interpreted audit credential review."
+    return 0
+  fi
 
-  awk -v start="$LOG_WINDOW_START_EPOCH" \
-      -v end="$CURRENT_EPOCH" '
-    {
-      if (!match($0, /msg=audit\(([0-9]+)(\.[0-9]+)?:([0-9]+)\)/, meta)) {
-        next
-      }
+  LC_ALL=C ausearch -if "$AUDIT_LOG_SNAPSHOT" -i -m "$AUDIT_CREDENTIAL_TYPES" \
+    -ts "$AUDIT_WINDOW_START_DATE" "$AUDIT_WINDOW_START_TIME" \
+    -te "$AUDIT_WINDOW_END_DATE" "$AUDIT_WINDOW_END_TIME" >"$ausearch_out" 2>/dev/null || true
 
-      epoch = meta[1] + 0
-      if (epoch <= start || epoch > end) {
-        next
-      }
-
-      if ($0 ~ /^type=(USER_ACCT|USER_AUTH|USER_CMD|USER_CHAUTHTOK|USER_START|USER_END|CRED_ACQ|CRED_DISP|ADD_USER|DEL_USER|ADD_GROUP|DEL_GROUP|CHUSER_ID|CHGRP_ID) /) {
-        print
-      }
-    }
-  ' "$AUDIT_LOG_SNAPSHOT" >"$out"
+  cp -a "$ausearch_out" "$out"
 }
 
 save_latest_run_state() {
@@ -513,88 +552,55 @@ initialize_baseline_if_missing lastb
 initialize_baseline_if_missing last_i
 ensure_baseline_time_files
 load_log_review_window
+set_comparison_target
 if [[ "$BASELINE_CREATED" -eq 1 ]]; then
   info "No baseline was found for one or more snapshots. Current data was saved as the fallback baseline."
 fi
 ok "Current run snapshots saved to $CURRENT_RUN_DIR"
 pause_step
 
-section_header "3) Compare Current Network State to Baseline"
+section_header "3) Compare Current Network State to $COMPARISON_LABEL"
 show_additions_report \
-  "3a) Listening Sockets Added vs Baseline" \
-  "$BASELINE_DIR/sockets.norm" \
+  "3a) Listening Sockets Added vs $COMPARISON_LABEL" \
+  "$COMPARISON_DIR/sockets.norm" \
   "$CURRENT_RUN_DIR/sockets.norm" \
-  "$REPORT_DIR/baseline_sockets_additions.txt"
+  "$REPORT_DIR/comparison_sockets_additions.txt"
 show_additions_report \
-  "3b) LSOF Network Entries Added vs Baseline" \
-  "$BASELINE_DIR/lsof.norm" \
+  "3b) LSOF Network Entries Added vs $COMPARISON_LABEL" \
+  "$COMPARISON_DIR/lsof.norm" \
   "$CURRENT_RUN_DIR/lsof.norm" \
-  "$REPORT_DIR/baseline_lsof_additions.txt"
+  "$REPORT_DIR/comparison_lsof_additions.txt"
 
-section_header "4) Compare Current Session/Auth State to Baseline"
+section_header "4) Compare Current Session/Auth State to $COMPARISON_LABEL"
 show_diff_report \
-  "4a) w Changes vs Baseline" \
-  "$BASELINE_DIR/w.norm" \
+  "4a) w Changes vs $COMPARISON_LABEL" \
+  "$COMPARISON_DIR/w.norm" \
   "$CURRENT_RUN_DIR/w.norm" \
-  "$REPORT_DIR/baseline_w_diff.txt"
+  "$REPORT_DIR/comparison_w_diff.txt"
 show_diff_report \
-  "4b) lastb Changes vs Baseline" \
-  "$BASELINE_DIR/lastb.norm" \
+  "4b) lastb Changes vs $COMPARISON_LABEL" \
+  "$COMPARISON_DIR/lastb.norm" \
   "$CURRENT_RUN_DIR/lastb.norm" \
-  "$REPORT_DIR/baseline_lastb_diff.txt"
+  "$REPORT_DIR/comparison_lastb_diff.txt"
 show_diff_report \
-  "4c) last -i Changes vs Baseline" \
-  "$BASELINE_DIR/last_i.norm" \
+  "4c) last -i Changes vs $COMPARISON_LABEL" \
+  "$COMPARISON_DIR/last_i.norm" \
   "$CURRENT_RUN_DIR/last_i.norm" \
-  "$REPORT_DIR/baseline_last_i_diff.txt"
+  "$REPORT_DIR/comparison_last_i_diff.txt"
 
-section_header "5) Compare Current State to Previous Run"
-if [[ -n "$PREVIOUS_RUN_DIR" ]]; then
-  show_additions_report \
-    "5a) Listening Sockets Added vs Previous Run" \
-    "$PREVIOUS_RUN_DIR/sockets.norm" \
-    "$CURRENT_RUN_DIR/sockets.norm" \
-    "$REPORT_DIR/previous_sockets_additions.txt"
-  show_additions_report \
-    "5b) LSOF Network Entries Added vs Previous Run" \
-    "$PREVIOUS_RUN_DIR/lsof.norm" \
-    "$CURRENT_RUN_DIR/lsof.norm" \
-    "$REPORT_DIR/previous_lsof_additions.txt"
-  show_diff_report \
-    "5c) w Changes vs Previous Run" \
-    "$PREVIOUS_RUN_DIR/w.norm" \
-    "$CURRENT_RUN_DIR/w.norm" \
-    "$REPORT_DIR/previous_w_diff.txt"
-  show_diff_report \
-    "5d) lastb Changes vs Previous Run" \
-    "$PREVIOUS_RUN_DIR/lastb.norm" \
-    "$CURRENT_RUN_DIR/lastb.norm" \
-    "$REPORT_DIR/previous_lastb_diff.txt"
-  show_diff_report \
-    "5e) last -i Changes vs Previous Run" \
-    "$PREVIOUS_RUN_DIR/last_i.norm" \
-    "$CURRENT_RUN_DIR/last_i.norm" \
-    "$REPORT_DIR/previous_last_i_diff.txt"
-else
-  section_header "5a) Previous Run Comparison"
-  show_output_source_header "REPORT: previous_run_comparison"
-  printf '%s\n' "none"
-  pause_step
-fi
-
-section_header "6) Review pspy/auditd Logs in Rolling Window"
+section_header "5) Review pspy/auditd Logs in Rolling Window"
 info "Reviewing only log entries between $LOG_WINDOW_START_PSPY_TS and $CURRENT_PSPY_TS."
 snapshot_logs_for_review
 generate_pspy_command_hits
 generate_pspy_create_hits
 generate_audit_rootcmd_hits
 generate_audit_credential_hits
-show_text_report "6a) pspy Suspicious Command Hits" "$REPORT_DIR/pspy_suspicious_commands.txt"
-show_text_report "6b) pspy Suspicious CREATE Hits" "$REPORT_DIR/pspy_suspicious_creates.txt"
-show_text_report "6c) auditd rootcmd Suspicious Command Hits" "$REPORT_DIR/audit_rootcmd_suspicious_commands.txt"
-show_text_report "6d) auditd Credential/Account Event Hits" "$REPORT_DIR/audit_credential_account_hits.txt"
+show_text_report "5a) pspy Suspicious Command Hits" "$REPORT_DIR/pspy_suspicious_commands.txt"
+show_text_report "5b) pspy Suspicious CREATE Hits" "$REPORT_DIR/pspy_suspicious_creates.txt"
+show_audit_report "5c) auditd rootcmd Suspicious Command Hits" "$REPORT_DIR/audit_rootcmd_suspicious_commands.txt"
+show_audit_report "5d) auditd Credential/Account Event Hits" "$REPORT_DIR/audit_credential_account_hits.txt"
 
-section_header "7) Finalize Threat Hunting Run"
+section_header "6) Finalize Threat Hunting Run"
 save_latest_run_state
 save_log_review_state
 info "Baseline files: $BASELINE_DIR"
