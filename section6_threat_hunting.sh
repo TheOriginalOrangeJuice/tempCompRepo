@@ -24,7 +24,10 @@ PSPY_LOG_SNAPSHOT="$LOG_SNAPSHOT_DIR/pspy.log"
 AUDIT_LOG_SNAPSHOT="$LOG_SNAPSHOT_DIR/audit.log"
 CURRENT_EPOCH="$(date +%s)"
 CURRENT_PSPY_TS="$(date '+%Y/%m/%d %H:%M:%S')"
-SUSPICIOUS_CMD_NAMES="bash,sh,dash,rbash,python,python3,perl,php,ruby,lua,nc,ncat,netcat,socat,curl,wget,ftp,tftp,scp,rsync,chmod,chown,chattr,setcap,getcap,systemctl,service,update-rc.d,chkconfig,crontab,at,atd,useradd,usermod,userdel,adduser,deluser,passwd,chpasswd,vipw,chage,groupadd,groupmod,gpasswd,sudo,visudo,ssh-keygen"
+SUSPICIOUS_CMD_NAMES="cat,bash,sh,dash,rbash,python,python3,perl,php,ruby,lua,nc,ncat,netcat,socat,curl,wget,ftp,tftp,scp,rsync,chmod,chown,chattr,setcap,getcap,systemctl,service,update-rc.d,chkconfig,crontab,at,atd,useradd,usermod,userdel,adduser,deluser,passwd,chpasswd,vipw,chage,groupadd,groupmod,gpasswd,sudo,visudo,ssh-keygen"
+AUDIT_ALWAYS_ALERT_CMD_NAMES="cat,nc,ncat,netcat,socat,curl,wget,ftp,tftp,scp,rsync,chmod,chown,chattr,setcap,getcap,systemctl,service,update-rc.d,chkconfig,crontab,at,atd,useradd,usermod,userdel,adduser,deluser,passwd,chpasswd,vipw,chage,groupadd,groupmod,gpasswd,sudo,visudo,ssh-keygen"
+AUDIT_ROOT_ONLY_CMD_NAMES="bash,sh,dash,rbash,python,python3,perl,php,ruby,lua"
+AUDIT_SELF_NOISE_REGEX='section6_threat_hunting\.sh|main_launcher\.sh|/root/threatHunting_files/|pspy_hunt_exclude\.txt|audit_rootcmd_ausearch|audit_credential_ausearch|cmd_list=|prefixes=/tmp/|egrep -i \(|grep -E -i \(|grep --color=auto|/tmp/section6_run'
 PSPY_CREATE_PREFIXES="/tmp/,/var/tmp/,/dev/shm/,/opt/,/home/,/root/,/usr/bin/,/usr/sbin/,/bin/,/sbin/"
 AUDIT_CREDENTIAL_TYPES="USER_ACCT,USER_AUTH,USER_CMD,USER_CHAUTHTOK,USER_START,USER_END,CRED_ACQ,CRED_DISP,ADD_USER,DEL_USER,ADD_GROUP,DEL_GROUP,CHUSER_ID,CHGRP_ID"
 PREVIOUS_RUN_DIR=""
@@ -545,12 +548,14 @@ generate_audit_rootcmd_hits() {
   : >"$out"
   : >"$ausearch_out"
 
-  run_ausearch_interpreted "$ausearch_out" "$ausearch_err" -k rootcmd \
+  run_ausearch_interpreted "$ausearch_out" "$ausearch_err" \
     -ts "$AUDIT_WINDOW_START_DATE" "$AUDIT_WINDOW_START_TIME" \
     -te "$AUDIT_WINDOW_END_DATE" "$AUDIT_WINDOW_END_TIME" || return 0
 
-  awk -v cmd_list="$SUSPICIOUS_CMD_NAMES" '
-    function token_is_suspicious(line,   count, i, tok, pieces) {
+  awk -v always_list="$AUDIT_ALWAYS_ALERT_CMD_NAMES" \
+      -v root_only_list="$AUDIT_ROOT_ONLY_CMD_NAMES" \
+      -v noise_re="$AUDIT_SELF_NOISE_REGEX" '
+    function token_in_set(line, set_name,   count, i, tok, pieces) {
       count = split(line, pieces, /[^[:alnum:]_\/.+-]+/)
       for (i = 1; i <= count; i++) {
         tok = pieces[i]
@@ -558,14 +563,37 @@ generate_audit_rootcmd_hits() {
           continue
         }
         sub(/^.*\//, "", tok)
-        if (tok in allow) {
+        if (tok in set_name) {
+          return 1
+        }
+      }
+      return 0
+    }
+    function block_is_rootish(block) {
+      return block ~ /key="?rootcmd"?|[[:space:]]uid=root|[[:space:]]euid=root|UID="root"|EUID="root"/
+    }
+    function block_is_noise(block) {
+      return block ~ noise_re
+    }
+    function block_is_interesting(block,   line_count, idx, line, rootish) {
+      rootish = block_is_rootish(block)
+      line_count = split(block, lines, /\n/)
+      for (idx = 1; idx <= line_count; idx++) {
+        line = lines[idx]
+        if (line !~ /^type=(SYSCALL|EXECVE|PROCTITLE|USER_CMD)/) {
+          continue
+        }
+        if (token_in_set(line, always_allow)) {
+          return 1
+        }
+        if (rootish && token_in_set(line, root_only_allow)) {
           return 1
         }
       }
       return 0
     }
     function flush_event() {
-      if (event_seen && event_match) {
+      if (event_seen && !block_is_noise(block) && block_is_interesting(block)) {
         printf "%s", block
         if (block !~ /\n$/) {
           printf "\n"
@@ -577,9 +605,13 @@ generate_audit_rootcmd_hits() {
       event_match = 0
     }
     BEGIN {
-      count = split(cmd_list, names, ",")
+      count = split(always_list, names, ",")
       for (i = 1; i <= count; i++) {
-        allow[names[i]] = 1
+        always_allow[names[i]] = 1
+      }
+      count = split(root_only_list, names, ",")
+      for (i = 1; i <= count; i++) {
+        root_only_allow[names[i]] = 1
       }
     }
     /^----/ {
@@ -595,9 +627,6 @@ generate_audit_rootcmd_hits() {
     {
       block = block $0 ORS
       event_seen = 1
-      if ($0 ~ /^type=(SYSCALL|EXECVE|PROCTITLE)/ && token_is_suspicious($0)) {
-        event_match = 1
-      }
     }
     END {
       flush_event()
@@ -702,7 +731,7 @@ generate_audit_rootcmd_hits
 generate_audit_credential_hits
 show_text_report "5b) pspy Suspicious Command Hits" "$REPORT_DIR/pspy_suspicious_commands.txt"
 show_text_report "5c) pspy Suspicious CREATE Hits" "$REPORT_DIR/pspy_suspicious_creates.txt"
-show_audit_report "5d) auditd rootcmd Suspicious Command Hits" "$REPORT_DIR/audit_rootcmd_suspicious_commands.txt"
+show_audit_report "5d) auditd Suspicious Command Hits" "$REPORT_DIR/audit_rootcmd_suspicious_commands.txt"
 show_audit_report "5e) auditd Credential/Account Event Hits" "$REPORT_DIR/audit_credential_account_hits.txt"
 
 section_header "6) Finalize Threat Hunting Run"
