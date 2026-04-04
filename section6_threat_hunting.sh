@@ -9,6 +9,7 @@ require_root "$@"
 
 TH_DIR="/root/threatHunting_files"
 BASELINE_DIR="$TH_DIR/baseline"
+PSPY_HUNT_EXCLUDE_FILE="$TH_DIR/pspy_hunt_exclude.txt"
 BASELINE_EPOCH_FILE="$TH_DIR/baseline_epoch"
 BASELINE_PSPY_TS_FILE="$TH_DIR/baseline_pspy_ts"
 LAST_LOG_REVIEW_EPOCH_FILE="$TH_DIR/last_log_review_epoch"
@@ -39,7 +40,47 @@ AUDIT_WINDOW_END_TIME=""
 
 ensure_threat_hunting_dirs() {
   mkdir -p "$BASELINE_DIR" "$RUNS_DIR" "$CURRENT_RUN_DIR" "$REPORT_DIR" "$LOG_SNAPSHOT_DIR"
+  if [[ ! -e "$PSPY_HUNT_EXCLUDE_FILE" ]]; then
+    cat >"$PSPY_HUNT_EXCLUDE_FILE" <<'EOF'
+# One substring per line. Matching pspy report lines will be suppressed.
+# Examples:
+# /apt/
+# unattended-upgrades
+EOF
+  fi
   ok "Threat hunting data will be stored under $TH_DIR"
+}
+
+trim_whitespace() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
+manage_pspy_hunt_exclusions() {
+  local raw_input=""
+  local entry=""
+  local added_count=0
+
+  section_header "5a) Review pspy Report Exclusions"
+  info "Raw pspy logs remain saved. This exclusion list only suppresses matching lines from the threat hunting pspy reports."
+  show_file_with_pause "$PSPY_HUNT_EXCLUDE_FILE"
+
+  if ask_yes_no "Add substring exclusions for pspy report output?" "N"; then
+    read -r -p "Enter substrings to exclude (comma-separated): " raw_input
+    IFS=',' read -r -a exclusion_items <<< "$raw_input"
+    for entry in "${exclusion_items[@]}"; do
+      entry="$(trim_whitespace "$entry")"
+      [[ -n "$entry" ]] || continue
+      if ! grep -Fqx -- "$entry" "$PSPY_HUNT_EXCLUDE_FILE"; then
+        printf '%s\n' "$entry" >>"$PSPY_HUNT_EXCLUDE_FILE"
+        added_count=$((added_count + 1))
+      fi
+    done
+    ok "Added $added_count new pspy exclusion entr$( [[ "$added_count" -eq 1 ]] && printf 'y' || printf 'ies' )."
+    show_file_with_pause "$PSPY_HUNT_EXCLUDE_FILE"
+  fi
 }
 
 normalize_snapshot() {
@@ -178,9 +219,9 @@ load_log_review_window() {
   info "Log review window start source: $source_label"
   info "Log review window: $LOG_WINDOW_START_PSPY_TS -> $CURRENT_PSPY_TS"
 
-  AUDIT_WINDOW_START_DATE="$(date -d "@$LOG_WINDOW_START_EPOCH" '+%m/%d/%Y')"
+  AUDIT_WINDOW_START_DATE="$(date -d "@$LOG_WINDOW_START_EPOCH" '+%m/%d/%y')"
   AUDIT_WINDOW_START_TIME="$(date -d "@$LOG_WINDOW_START_EPOCH" '+%H:%M:%S')"
-  AUDIT_WINDOW_END_DATE="$(date -d "@$CURRENT_EPOCH" '+%m/%d/%Y')"
+  AUDIT_WINDOW_END_DATE="$(date -d "@$CURRENT_EPOCH" '+%m/%d/%y')"
   AUDIT_WINDOW_END_TIME="$(date -d "@$CURRENT_EPOCH" '+%H:%M:%S')"
 }
 
@@ -307,6 +348,35 @@ show_audit_report() {
   pause_step
 }
 
+run_ausearch_interpreted() {
+  local out_file="$1"
+  local err_file="$2"
+  shift 2
+  local -a query_args=("$@")
+
+  : >"$out_file"
+  : >"$err_file"
+
+  if ! command_exists ausearch; then
+    warn "ausearch not available; skipping interpreted audit review."
+    return 1
+  fi
+
+  # Prefer the host's live audit logs. They are more reliable than replaying a copied
+  # snapshot through older ausearch builds. Fall back to the snapshot only if needed.
+  LC_ALL=C ausearch --input-logs -i "${query_args[@]}" >"$out_file" 2>"$err_file" || true
+
+  if [[ ! -s "$out_file" && -r "$AUDIT_LOG_SNAPSHOT" ]]; then
+    LC_ALL=C ausearch --input-logs -if "$AUDIT_LOG_SNAPSHOT" -i "${query_args[@]}" >"$out_file" 2>>"$err_file" || true
+  fi
+
+  if [[ ! -s "$out_file" && -s "$err_file" ]]; then
+    warn "ausearch returned no readable output. See $err_file for details."
+  fi
+
+  return 0
+}
+
 snapshot_logs_for_review() {
   if [[ -r /root/pspy.log ]]; then
     cp -a /root/pspy.log "$PSPY_LOG_SNAPSHOT"
@@ -335,6 +405,7 @@ generate_pspy_command_hits() {
   awk -v start="$LOG_WINDOW_START_PSPY_TS" \
       -v end="$CURRENT_PSPY_TS" \
       -v cmd_list="$SUSPICIOUS_CMD_NAMES" \
+      -v exclude_file="$PSPY_HUNT_EXCLUDE_FILE" \
       -v self_noise="$self_noise" '
     function strip_ansi(s) {
       gsub(/\033\[[0-9;]*[[:alpha:]]/, "", s)
@@ -362,11 +433,28 @@ generate_pspy_command_hits() {
       }
       return 0
     }
+    function line_is_excluded(line,   i) {
+      for (i = 1; i <= exclude_count; i++) {
+        if (exclude_list[i] != "" && index(line, exclude_list[i]) > 0) {
+          return 1
+        }
+      }
+      return 0
+    }
     BEGIN {
       count = split(cmd_list, names, ",")
       for (i = 1; i <= count; i++) {
         allow[names[i]] = 1
       }
+      while ((getline exclude_line < exclude_file) > 0) {
+        sub(/^[[:space:]]+/, "", exclude_line)
+        sub(/[[:space:]]+$/, "", exclude_line)
+        if (exclude_line == "" || exclude_line ~ /^#/) {
+          continue
+        }
+        exclude_list[++exclude_count] = exclude_line
+      }
+      close(exclude_file)
     }
     {
       line = strip_ansi($0)
@@ -381,6 +469,9 @@ generate_pspy_command_hits() {
       sub(/^.*\|[[:space:]]*/, "", cmd)
       cmd = trim(cmd)
       if (cmd == "" || cmd ~ self_noise) {
+        next
+      }
+      if (line_is_excluded(line) || line_is_excluded(cmd)) {
         next
       }
       if (token_is_suspicious(cmd)) {
@@ -398,13 +489,31 @@ generate_pspy_create_hits() {
 
   awk -v start="$LOG_WINDOW_START_PSPY_TS" \
       -v end="$CURRENT_PSPY_TS" \
-      -v prefixes="$PSPY_CREATE_PREFIXES" '
+      -v prefixes="$PSPY_CREATE_PREFIXES" \
+      -v exclude_file="$PSPY_HUNT_EXCLUDE_FILE" '
     function strip_ansi(s) {
       gsub(/\033\[[0-9;]*[[:alpha:]]/, "", s)
       return s
     }
+    function line_is_excluded(line,   i) {
+      for (i = 1; i <= exclude_count; i++) {
+        if (exclude_list[i] != "" && index(line, exclude_list[i]) > 0) {
+          return 1
+        }
+      }
+      return 0
+    }
     BEGIN {
       prefix_count = split(prefixes, prefix_list, ",")
+      while ((getline exclude_line < exclude_file) > 0) {
+        sub(/^[[:space:]]+/, "", exclude_line)
+        sub(/[[:space:]]+$/, "", exclude_line)
+        if (exclude_line == "" || exclude_line ~ /^#/) {
+          continue
+        }
+        exclude_list[++exclude_count] = exclude_line
+      }
+      close(exclude_file)
     }
     {
       line = strip_ansi($0)
@@ -413,6 +522,9 @@ generate_pspy_create_hits() {
         next
       }
       if (line !~ /CREATE/) {
+        next
+      }
+      if (line_is_excluded(line)) {
         next
       }
       for (i = 1; i <= prefix_count; i++) {
@@ -428,18 +540,14 @@ generate_pspy_create_hits() {
 generate_audit_rootcmd_hits() {
   local out="$REPORT_DIR/audit_rootcmd_suspicious_commands.txt"
   local ausearch_out="$REPORT_DIR/audit_rootcmd_ausearch_full.txt"
+  local ausearch_err="$REPORT_DIR/audit_rootcmd_ausearch.err"
 
   : >"$out"
   : >"$ausearch_out"
-  [[ -r "$AUDIT_LOG_SNAPSHOT" ]] || return 0
-  if ! command_exists ausearch; then
-    warn "ausearch not available; skipping interpreted audit rootcmd review."
-    return 0
-  fi
 
-  LC_ALL=C ausearch -if "$AUDIT_LOG_SNAPSHOT" -i -k rootcmd \
+  run_ausearch_interpreted "$ausearch_out" "$ausearch_err" -k rootcmd \
     -ts "$AUDIT_WINDOW_START_DATE" "$AUDIT_WINDOW_START_TIME" \
-    -te "$AUDIT_WINDOW_END_DATE" "$AUDIT_WINDOW_END_TIME" >"$ausearch_out" 2>/dev/null || true
+    -te "$AUDIT_WINDOW_END_DATE" "$AUDIT_WINDOW_END_TIME" || return 0
 
   awk -v cmd_list="$SUSPICIOUS_CMD_NAMES" '
     function token_is_suspicious(line,   count, i, tok, pieces) {
@@ -500,18 +608,14 @@ generate_audit_rootcmd_hits() {
 generate_audit_credential_hits() {
   local out="$REPORT_DIR/audit_credential_account_hits.txt"
   local ausearch_out="$REPORT_DIR/audit_credential_ausearch_full.txt"
+  local ausearch_err="$REPORT_DIR/audit_credential_ausearch.err"
 
   : >"$out"
-  [[ -r "$AUDIT_LOG_SNAPSHOT" ]] || return 0
   : >"$ausearch_out"
-  if ! command_exists ausearch; then
-    warn "ausearch not available; skipping interpreted audit credential review."
-    return 0
-  fi
 
-  LC_ALL=C ausearch -if "$AUDIT_LOG_SNAPSHOT" -i -m "$AUDIT_CREDENTIAL_TYPES" \
+  run_ausearch_interpreted "$ausearch_out" "$ausearch_err" -m "$AUDIT_CREDENTIAL_TYPES" \
     -ts "$AUDIT_WINDOW_START_DATE" "$AUDIT_WINDOW_START_TIME" \
-    -te "$AUDIT_WINDOW_END_DATE" "$AUDIT_WINDOW_END_TIME" >"$ausearch_out" 2>/dev/null || true
+    -te "$AUDIT_WINDOW_END_DATE" "$AUDIT_WINDOW_END_TIME" || return 0
 
   cp -a "$ausearch_out" "$out"
 }
@@ -590,15 +694,16 @@ show_diff_report \
 
 section_header "5) Review pspy/auditd Logs in Rolling Window"
 info "Reviewing only log entries between $LOG_WINDOW_START_PSPY_TS and $CURRENT_PSPY_TS."
+manage_pspy_hunt_exclusions
 snapshot_logs_for_review
 generate_pspy_command_hits
 generate_pspy_create_hits
 generate_audit_rootcmd_hits
 generate_audit_credential_hits
-show_text_report "5a) pspy Suspicious Command Hits" "$REPORT_DIR/pspy_suspicious_commands.txt"
-show_text_report "5b) pspy Suspicious CREATE Hits" "$REPORT_DIR/pspy_suspicious_creates.txt"
-show_audit_report "5c) auditd rootcmd Suspicious Command Hits" "$REPORT_DIR/audit_rootcmd_suspicious_commands.txt"
-show_audit_report "5d) auditd Credential/Account Event Hits" "$REPORT_DIR/audit_credential_account_hits.txt"
+show_text_report "5b) pspy Suspicious Command Hits" "$REPORT_DIR/pspy_suspicious_commands.txt"
+show_text_report "5c) pspy Suspicious CREATE Hits" "$REPORT_DIR/pspy_suspicious_creates.txt"
+show_audit_report "5d) auditd rootcmd Suspicious Command Hits" "$REPORT_DIR/audit_rootcmd_suspicious_commands.txt"
+show_audit_report "5e) auditd Credential/Account Event Hits" "$REPORT_DIR/audit_credential_account_hits.txt"
 
 section_header "6) Finalize Threat Hunting Run"
 save_latest_run_state
